@@ -1,0 +1,494 @@
+
+#pragma kernel Advect
+#pragma kernel Diffuse
+#pragma kernel AddExternalForces
+#pragma kernel SubtractPressureGradient
+#pragma kernel Divergence
+
+#pragma kernel CopyDensityToRT
+
+#pragma kernel SwapDensity
+#pragma kernel SwapVelocity
+
+#pragma kernel AddForcesHardCoded
+
+#pragma kernel BoundaryVelocity
+#pragma kernel BoundaryPressure
+#pragma kernel BoundaryInk
+
+// advect
+// divergence
+// jacobi
+// gradient
+// boundary //For now fck it
+// vorticity // later
+// vortForce // later
+// Display functions (for new velocity)
+
+RWTexture2D<float4> FuildRT;
+RWBuffer<float2> u; //Flow Velocity
+RWBuffer<float2> u_temp; //Old Flow Velocity
+RWBuffer<float> p; //Density
+RWBuffer<float> p_temp; //Old Density
+RWBuffer<float> div; //Old Density
+RWBuffer<int> boundaryIndexes; //Old Density
+
+RWBuffer<float> ink; //Old Density
+
+RWBuffer<float2> w; //Vector field
+float4 Color;
+
+int size = 64;
+float dt; //Delta time
+float visc = 2; // viscosity
+float rdx = 1; // viscosity
+float dissipation;
+
+float bilerp(float2 pos, RWBuffer<float> array);
+float2 bilerp(float2 pos, RWBuffer<float2> array);
+float4 bilerp(float2 pos, RWBuffer<float4> array);
+void advect(int2 coords, out float xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float> valueToAdvect);
+void advect(int2 coords, out float2 xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float2> valueToAdvect);
+void advect(int2 coords, out float4 xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float4> valueToAdvect);
+void jacobi(int2 coords, out float xNew, half alpha, half rBeta, RWBuffer<float> x, RWBuffer<float> b);
+void jacobi(int2 coords, out float2 xNew, half alpha, half rBeta, RWBuffer<float2> x, RWBuffer<float2> b);
+void divergence(int2 coords, out float div, half halfrdx, RWBuffer<float2> w);
+void gradient(int2 coords, out float2 uNew, half halfrdx, RWBuffer<float> p, RWBuffer<float2> w);
+void gradient(int2 coords, out float2 uNew, half halfrdx, RWBuffer<float> p, RWBuffer<float2> w);
+void boundary(int2 coords, int2 offset, half scale, RWBuffer<float2> x);
+void boundary(int2 coords, int2 offset, half scale, RWBuffer<float> x);
+void boundary(int2 coords, half scale, RWBuffer<float> x);
+void boundary(int2 coords, half scale, RWBuffer<float2> x);
+void boundary(int2 coords, half scale, RWBuffer<float4> x);
+
+[numthreads(8, 8, 1)]
+void CopyDensityToRT(uint3 id : SV_DispatchThreadID)
+{
+    //FuildRT[id.xy] = float4(u[id.x + id.y * size].xy, 0, 1);
+    //FuildRT[id.xy] = float4(p_temp[id.x + id.y * size], 0, 0, 1);
+    FuildRT[id.xy] = float4(Color.xyz, 0) * ink[id.x + id.y * size];
+    //FuildRT[id.xy] = float4(div[id.x + id.y * size], 0, 0, 1);
+}
+
+[numthreads(8, 8, 1)]
+void BoundaryVelocity(uint3 id : SV_DispatchThreadID)
+{
+    boundary(id.xy, -1, u);
+}
+
+[numthreads(8, 8, 1)]
+void BoundaryPressure(uint3 id : SV_DispatchThreadID)
+{
+    boundary(id.xy, 1, p);
+}
+
+[numthreads(8, 8, 1)]
+void BoundaryInk(uint3 id : SV_DispatchThreadID)
+{
+    boundary(id.xy, 1, ink);
+}
+ 
+[numthreads(8, 8, 1)]
+void Divergence(uint3 id : SV_DispatchThreadID)
+{
+    float newDiv;
+    divergence(id.xy, newDiv, rdx * 0.5, u);
+    div[id.x + id.y * size] = newDiv;
+}
+ 
+[numthreads(8, 8, 1)]
+void AddForcesHardCoded(uint3 id : SV_DispatchThreadID)
+{
+    id.xy += float2(0, size / 4);
+    
+    int ofsetor = 2;
+    u[id.x + id.y * size] += float2(1, 0) * ofsetor;
+    u_temp[id.x + id.y * size] += float2(1, 0) * ofsetor;
+    
+    ink[id.x + id.y * size] = 1;
+
+}
+ 
+[numthreads(8, 8, 1)]
+void AddExternalForces(uint3 id : SV_DispatchThreadID)
+{
+    //if(id.x % 4 != 0)
+    //    return;
+    
+    float height = ((float) (id.y) / (size - 1));
+    float offset = 100 * dt;
+    int index = id.x + id.y * size;
+    //float2 force = float2(0, -100) * dt;
+    //u_temp[id.x + id.y * size] += force;
+    //u[id.x + id.y * size] += force;
+    //u_temp[index] += float2(0, -offset);
+    //u[index] += float2(0, -offset);
+    //div[index] += offset;
+
+    
+}
+
+[numthreads(8, 8, 1)]
+void Advect(uint3 id : SV_DispatchThreadID)
+{
+    int index = id.x + id.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        return;
+    
+    float2 newVelocity;
+    float newInk;
+    
+    advect(id.xy, newVelocity, dt, rdx, u_temp, u_temp);
+    advect(id.xy, newInk, dt, rdx, u_temp, ink);
+    
+    float factorInk = newInk * lerp(0.9995, 0.999, 0);
+    float2 factorVel = newVelocity * lerp(0.9995, 0.999, 0);
+    
+    ink[id.x + id.y * size] = newInk;
+    float maxVelocity = 500;
+    u[id.x + id.y * size] = newVelocity; //clamp(factorVel, float2(-maxVelocity, -maxVelocity), float2(maxVelocity, maxVelocity));
+
+}
+
+[numthreads(8, 8, 1)]
+void Diffuse(uint3 id : SV_DispatchThreadID)
+{
+    int index = id.x + id.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        return;
+    
+    float newPressure;
+    float alpha = -1;
+    float rbeta = 0.25f;
+    jacobi(id.xy, newPressure, alpha, rbeta, p_temp, div);
+    p[index] = newPressure;
+
+}
+
+[numthreads(8, 8, 1)]
+void SubtractPressureGradient(uint3 id : SV_DispatchThreadID)
+{
+    int index = id.x + id.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        return;
+    
+    float2 uNew;
+    gradient(id.xy, uNew, rdx * 0.5, p_temp, u_temp);
+    u[id.x + id.y * size] = uNew;
+}
+
+[numthreads(8, 8, 1)]
+void SwapDensity(uint3 id : SV_DispatchThreadID)
+{
+    p_temp[id.x + id.y * size] = p[id.x + id.y * size];
+}
+
+[numthreads(8, 8, 1)]
+void SwapVelocity(uint3 id : SV_DispatchThreadID)
+{
+    u_temp[id.x + id.y * size] = u[id.x + id.y * size];
+}
+
+
+//Advect -> diffuse -> addForces
+// Compute Pressure -> subtractPressureGradient ?? divergence -> gradient
+
+//d2 p = boki - 4 * srodek / distanceBetweenCells (default = 1)
+//d2 p = d * w
+
+//move values from cell to cell as velocity, pressure
+//rdx -> grid scale -> 1
+//xNew -> new advected value
+void advect(int2 coords, out float xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float> valueToAdvect)
+{
+    // follow the velocity field "back in time"
+    float2 pos = coords - timestep * rdx * velocity[coords.x + coords.y * size];
+    pos = clamp(pos, float2(0, 0), float2(size - 1, size - 1));
+    xNew = bilerp(pos, valueToAdvect);
+}
+
+//same but to float2 values
+void advect(int2 coords, out float2 xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float2> valueToAdvect)
+{
+    float2 pos = coords - timestep * rdx * velocity[coords.x + coords.y * size];
+    pos = clamp(pos, float2(0, 0), float2(size - 2, size - 2));
+    xNew = bilerp(pos, valueToAdvect);
+}
+
+void advect(int2 coords, out float4 xNew, float timestep, float rdx, RWBuffer<float2> velocity, RWBuffer<float4> valueToAdvect)
+{
+    float2 pos = coords - timestep * rdx * velocity[coords.x + coords.y * size];
+    pos = clamp(pos, float2(0, 0), float2(size - 2, size - 2));
+    //if (boundaryIndexes[(int) pos.x + (int)pos.y * size]  == -2) 
+    xNew = bilerp(pos, valueToAdvect);
+}
+
+float bilerp(float2 pos, RWBuffer<float> array)
+{
+    int x1 = (int) pos.x;
+    x1 = clamp(x1, 0, size - 1);
+    int x2 = x1 + 1;
+    
+    int y1 = (int) pos.y;
+    y1 = clamp(y1, 0, size - 1);
+    int y2 = y1 + 1;
+         
+    float2 fracValue = frac(pos);
+    
+    float value0 = array[x1 + y1 * size]; //Left Down
+    float value1 = array[x1 + y2 * size]; //Left Top
+    float value2 = array[x2 + y1 * size]; //Right Down
+    float value3 = array[x2 + y2 * size]; //Right top
+    
+    return lerp(lerp(value0, value1, fracValue.y), lerp(value2, value3, fracValue.y), fracValue.x);
+}
+
+float2 bilerp(float2 pos, RWBuffer<float2> array)
+{
+    int x1 = (int) pos.x;
+    x1 = clamp(x1, 0, size - 1);
+    int x2 = x1 + 1;
+    
+    int y1 = (int) pos.y;
+    y1 = clamp(y1, 0, size - 1);
+    int y2 = y1 + 1;
+            
+    float2 fracValue = frac(pos);
+    
+    float2 value0 = array[x1 + y1 * size]; //Left Down
+    float2 value1 = array[x1 + y2 * size]; //Left Top
+    float2 value2 = array[x2 + y1 * size]; //Right Down
+    float2 value3 = array[x2 + y2 * size]; //Right top
+    
+    return lerp(lerp(value0, value1, fracValue.y), lerp(value2, value3, fracValue.y), fracValue.x);
+}
+
+float4 bilerp(float2 pos, RWBuffer<float4> array)
+{
+    int x1 = (int) pos.x;
+    x1 = clamp(x1, 0, size - 1);
+    int x2 = x1 + 1;
+    
+    int y1 = (int) pos.y;
+    y1 = clamp(y1, 0, size - 1);
+    int y2 = y1 + 1;
+            
+    float2 fracValue = frac(pos);
+    
+    float4 value0 = array[x1 + y1 * size]; //Left Down
+    float4 value1 = array[x1 + y2 * size]; //Left Top
+    float4 value2 = array[x2 + y1 * size]; //Right Down
+    float4 value3 = array[x2 + y2 * size]; //Right top
+    
+    return lerp(lerp(value0, value1, fracValue.y), lerp(value2, value3, fracValue.y), fracValue.x);
+}
+
+//Use in for from 20 to 50 loops
+//Difuse
+//For Poisson-pressure
+//x -> p
+//b -> gradient w albo p?
+//alpha -> -(x^2) ?? -4
+//rbeta -> .25
+//For viscous diffusion equation
+//x = b -> u (velocity?)
+//alpha -> (-4) / t
+//rbeta -> 1 / (4 + (x)^2/t ) -> 1/( 4 - 4 / t) ?
+void jacobi(int2 coords, out float xNew, // result
+half alpha, half rBeta, // reciprocal beta
+RWBuffer<float> x, // x vector (Ax = b)   
+RWBuffer<float> b) // b vector (Ax = b) 
+{
+    int2 index0 = coords - int2(1, 0); //Left    
+    int2 index1 = coords + int2(1, 0); //right
+    int2 index2 = coords - int2(0, 1); //down
+    int2 index3 = coords + int2(0, 1); //up
+    
+    float2 maxIndex = float2(size - 1, size - 1);
+    index0 = clamp(index0, float2(0, 0), maxIndex);
+    index1 = clamp(index1, float2(0, 0), maxIndex);
+    index2 = clamp(index2, float2(0, 0), maxIndex);
+    index3 = clamp(index3, float2(0, 0), maxIndex);
+
+    float value0 = x[index0.x + index0.y * size];
+    float value1 = x[index1.x + index1.y * size];
+    float value2 = x[index2.x + index2.y * size];
+    float value3 = x[index3.x + index3.y * size];
+    
+    float center = b[coords.x + coords.y * size];
+    
+    xNew = (value0 + value1 + value2 + value3 + alpha * center) * rBeta;
+}
+
+void jacobi(int2 coords, out float2 xNew, half alpha, half rBeta, RWBuffer<float2> x, RWBuffer<float2> b)
+{
+    int2 index0 = coords - int2(1, 0); //Left
+    int2 index1 = coords + int2(1, 0); //right
+    int2 index2 = coords - int2(0, 1); //down
+    int2 index3 = coords + int2(0, 1); //up
+    
+    float2 maxIndex = float2(size - 1, size - 1);
+    index0 = clamp(index0, float2(0, 0), maxIndex);
+    index1 = clamp(index1, float2(0, 0), maxIndex);
+    index2 = clamp(index2, float2(0, 0), maxIndex);
+    index3 = clamp(index3, float2(0, 0), maxIndex);
+
+    float2 value0 = x[index0.x + index0.y * size];
+    float2 value1 = x[index1.x + index1.y * size];
+    float2 value2 = x[index2.x + index2.y * size];
+    float2 value3 = x[index3.x + index3.y * size];
+    
+    float2 center = b[coords.x + coords.y * size];
+    
+    xNew = (value0 + value1 + value2 + value3 + alpha * center) * rBeta;
+}
+
+//calculate ppressure
+void divergence(int2 coords, // grid coordinates     
+out float div, // divergence
+half halfrdx, // 0.5 / gridscale
+RWBuffer<float2> w)  // vector field 
+{
+    int mainIndex = coords.x + coords.y * size;
+    int2 index0 = coords - int2(1, 0); //Left
+    int2 index1 = coords + int2(1, 0); //right
+    int2 index2 = coords - int2(0, 1); //down
+    int2 index3 = coords + int2(0, 1); //up
+    
+    float2 maxIndex = float2(size - 1, size - 1);
+    index0 = clamp(index0, float2(0, 0), maxIndex);
+    index1 = clamp(index1, float2(0, 0), maxIndex);
+    index2 = clamp(index2, float2(0, 0), maxIndex);
+    index3 = clamp(index3, float2(0, 0), maxIndex);
+
+    float2 value0 = w[index0.x + index0.y * size];
+    float2 value1 = w[index1.x + index1.y * size];
+    float2 value2 = w[index2.x + index2.y * size];
+    float2 value3 = w[index3.x + index3.y * size];
+
+    div = halfrdx * ((value1.x - value0.x) + (value3.y - value2.y));
+}
+
+void gradient(int2 coords,
+out float2 uNew,
+half halfrdx, // 0.5 / gridscale    
+RWBuffer<float> p, // pressure   
+RWBuffer<float2> w) // velocity 
+{
+    int2 index0 = coords - int2(1, 0); //Left
+    int2 index1 = coords + int2(1, 0); //right
+    int2 index2 = coords - int2(0, 1); //bottom
+    int2 index3 = coords + int2(0, 1); //top
+    
+    float2 maxIndex = float2(size - 1, size - 1);
+    index0 = clamp(index0, float2(0, 0), maxIndex);
+    index1 = clamp(index1, float2(0, 0), maxIndex);
+    index2 = clamp(index2, float2(0, 0), maxIndex);
+    index3 = clamp(index3, float2(0, 0), maxIndex);
+
+    float pL = p[index0.x + index0.y * size];
+    float pR = p[index1.x + index1.y * size];
+    float pB = p[index2.x + index2.y * size];
+    float pT = p[index3.x + index3.y * size];
+    uNew = w[coords.x + coords.y * size];
+    float2 grad = 0.5 * float2(pR - pL, pT - pB);
+    
+    uNew.xy -= grad;
+
+}
+
+void boundary(int2 coords, int2 offset, half scale, RWBuffer<float2> x)
+{
+    int2 newOffset = coords + offset;
+    x[coords.x + coords.y * size] = scale * x[newOffset.x + newOffset.y * size];
+}
+
+void boundary(int2 coords, int2 offset, half scale, RWBuffer<float> x)
+{
+    int2 newOffset = coords + offset;
+    x[coords.x + coords.y * size] = scale * x[newOffset.x + newOffset.y * size];
+}
+
+void boundary(int2 coords, half scale, RWBuffer<float> x)
+{
+    int index = coords.x + coords.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        x[index] = scale * x[boundaryIndex];
+
+    if (boundaryIndex == -2)
+        x[index] = 0;
+}
+
+void boundary(int2 coords, half scale, RWBuffer<float2> x)
+{
+    int index = coords.x + coords.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        x[index] = scale * x[boundaryIndex];
+    if (boundaryIndex == -2)
+        x[index] = 0;
+
+}
+
+void boundary(int2 coords, half scale, RWBuffer<float4> x)
+{
+    int index = coords.x + coords.y * size;
+    int boundaryIndex = boundaryIndexes[index];
+    
+    if (boundaryIndex >= 0)
+        x[index] = scale * x[boundaryIndex];
+    if (boundaryIndex == -2)
+        x[index] = 0;
+}
+
+
+//void vorticity(half2 coords : WPOS,
+//           out half vort : COLOR,
+
+//       uniform half halfrdx, // 0.5 / gridscale
+//       uniform samplerRECT u)       // velocity
+//{
+//    half4 uL, uR, uB, uT;
+//    h4texRECTneighbors(u, coords, uL, uR, uB, uT);
+  
+//    vort = halfrdx * ((uR.y - uL.y) - (uT.x - uB.x));
+//}
+
+//-----------------------
+//void vortForce(half2 coords : WPOS,
+
+//           out half2 uNew : COLOR,
+         
+//       uniform half halfrdx, // 0.5 / gridscale
+//       uniform half2 dxscale, // vorticity confinement scale
+//       uniform half timestep,
+//       uniform samplerRECT vort, // vorticity
+//       uniform samplerRECT u)        // velocity
+//{
+//    half vL, vR, vB, vT, vC;
+//    h1texRECTneighbors(vort, coords, vL, vR, vB, vT);
+  
+//    vC = h1texRECT(vort, coords);
+  
+//    half2 force = halfrdx * half2(abs(vT) - abs(vB), abs(vR) - abs(vL));
+  
+//  // safe normalize
+//    static const half EPSILON = 2.4414e-4; // 2^-12
+//    half magSqr = max(EPSILON, dot(force, force));
+//    force = force * rsqrt(magSqr);
+  
+//    force *= dxscale * vC * half2(1, -1);
+
+//    uNew = h2texRECT(u, coords);
+
+//    uNew += timestep * force;
+//}
